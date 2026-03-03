@@ -17,9 +17,18 @@ import argparse
 import asyncio
 import json
 import re
+import sys
 import traceback
 from datetime import datetime
 from pathlib import Path
+
+# Windows cp949 콘솔 한글 깨짐 방지
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 from browser import create_session
 from config import CURRENT_SEMESTER, REQUEST_DELAY
@@ -36,7 +45,6 @@ from extractors.materials import download_materials
 OUTPUT_DIR = Path(__file__).parent / "output"
 COURSES_DIR = OUTPUT_DIR / "courses"
 
-# 스캔 결과의 feature key -> 추출기 매핑
 FEATURE_EXTRACTORS = {
     "syllabus": ("강의계획서", extract_syllabus),
     "grades": ("성적", extract_grades),
@@ -45,7 +53,6 @@ FEATURE_EXTRACTORS = {
     "activities": ("활동/과제", extract_assignments),
 }
 
-# --only 옵션에서 사용 가능한 키 목록
 EXTRACTABLE_TYPES = list(FEATURE_EXTRACTORS.keys()) + ["materials"]
 
 
@@ -66,35 +73,21 @@ def build_parser() -> argparse.ArgumentParser:
   python main.py --no-calendar              캘린더 제외
         """,
     )
-    parser.add_argument(
-        "--list", action="store_true",
-        help="수강 과목 목록만 출력하고 종료",
-    )
-    parser.add_argument(
-        "--scan", action="store_true",
-        help="과목별 구조 분석만 실행 (추출 없이 어떤 기능이 있는지 확인)",
-    )
-    parser.add_argument(
-        "--course", nargs="+", metavar="FILTER",
-        help="추출할 과목 지정 (번호 또는 이름 키워드, 여러 개 가능)",
-    )
-    parser.add_argument(
-        "--only", nargs="+", metavar="TYPE",
-        choices=EXTRACTABLE_TYPES,
-        help=f"추출할 데이터 타입 선택: {', '.join(EXTRACTABLE_TYPES)}",
-    )
-    parser.add_argument(
-        "--download", action="store_true",
-        help="수업자료 파일 다운로드 포함",
-    )
-    parser.add_argument(
-        "--no-calendar", action="store_true",
-        help="캘린더 이벤트 추출 건너뛰기",
-    )
-    parser.add_argument(
-        "--test", action="store_true",
-        help="첫 번째 과목만 추출 (테스트)",
-    )
+    parser.add_argument("--list", action="store_true",
+                        help="수강 과목 목록만 출력하고 종료")
+    parser.add_argument("--scan", action="store_true",
+                        help="과목별 구조 분석만 실행 (추출 없이)")
+    parser.add_argument("--course", nargs="+", metavar="FILTER",
+                        help="추출할 과목 (번호 또는 이름 키워드)")
+    parser.add_argument("--only", nargs="+", metavar="TYPE",
+                        choices=EXTRACTABLE_TYPES,
+                        help=f"추출 데이터 타입: {', '.join(EXTRACTABLE_TYPES)}")
+    parser.add_argument("--download", action="store_true",
+                        help="수업자료 파일 다운로드 포함")
+    parser.add_argument("--no-calendar", action="store_true",
+                        help="캘린더 이벤트 추출 건너뛰기")
+    parser.add_argument("--test", action="store_true",
+                        help="첫 번째 과목만 추출 (테스트)")
     return parser
 
 
@@ -106,10 +99,7 @@ def _sanitize_filename(name: str) -> str:
 
 def _save_json(data: dict, path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _filter_courses(courses: list[dict], filters: list[str]) -> list[dict]:
@@ -121,7 +111,7 @@ def _filter_courses(courses: list[dict], filters: list[str]) -> list[dict]:
                 if courses[idx] not in selected:
                     selected.append(courses[idx])
             else:
-                print(f"  [경고] 과목 번호 {f}이(가) 범위를 벗어남 (1~{len(courses)})")
+                print(f"  [경고] 과목 번호 {f}: 범위 초과 (1~{len(courses)})")
         else:
             for c in courses:
                 if f.lower() in c["name"].lower() and c not in selected:
@@ -129,18 +119,49 @@ def _filter_courses(courses: list[dict], filters: list[str]) -> list[dict]:
     return selected
 
 
+def _print_scan_summary(courses: list[dict], scans: dict[int, CourseScan], extract_plan: list[str]):
+    """스캔 결과 요약을 출력하고, 각 과목에서 무엇을 추출할지 보여준다."""
+    print(f"\n{'='*60}")
+    print(f"  스캔 결과 요약 (추출 계획)")
+    print(f"{'='*60}")
+    for course in courses:
+        scan = scans.get(course["id"])
+        if not scan:
+            print(f"\n  [{course['id']}] {course['name']} - 스캔 실패")
+            continue
+
+        will_extract = []
+        will_skip = []
+        for key in extract_plan:
+            if key == "materials":
+                if scan.downloadable_resources:
+                    will_extract.append(f"자료다운({len(scan.downloadable_resources)})")
+                else:
+                    will_skip.append("자료다운(없음)")
+            elif key in FEATURE_EXTRACTORS:
+                label = FEATURE_EXTRACTORS[key][0]
+                if scan.has(key) or key == "activities":
+                    will_extract.append(label)
+                else:
+                    will_skip.append(f"{label}(없음)")
+
+        print(f"\n  [{course['id']}] {course['name']}")
+        print(f"    추출: {', '.join(will_extract) if will_extract else '없음'}")
+        if will_skip:
+            print(f"    건너뜀: {', '.join(will_skip)}")
+        if scan.boards:
+            print(f"    게시판: {', '.join(b['name'] for b in scan.boards)}")
+    print(f"{'='*60}")
+
+
 async def extract_course_data(
-    session,
-    course: dict,
-    scan: CourseScan,
-    extract_types: list[str] | None = None,
-    do_download: bool = False,
+    session, course: dict, scan: CourseScan,
+    extract_types: list[str] | None = None, do_download: bool = False,
 ) -> dict:
     """스캔 결과를 기반으로 실제 존재하는 기능만 추출한다."""
     cid = course["id"]
     print(f"\n{'='*50}")
     print(f"  과목: {course['name']} (id={cid})")
-    print(f"  발견된 기능: {', '.join(scan.available_keys)}")
     print(f"{'='*50}")
 
     page = session.page
@@ -152,14 +173,11 @@ async def extract_course_data(
         "scan": scan.to_dict(),
     }
 
-    # --only가 지정되면 그것만, 아니면 스캔에서 발견된 것만 추출
+    # 추출 대상 결정: --only가 있으면 그 중 스캔에서 발견된 것만
     if extract_types:
         targets = [t for t in extract_types if t in FEATURE_EXTRACTORS]
     else:
-        targets = [
-            key for key in FEATURE_EXTRACTORS
-            if scan.has(key) or key == "activities"  # activities는 항상 추출
-        ]
+        targets = list(FEATURE_EXTRACTORS.keys())
 
     for key in targets:
         label, extractor_fn = FEATURE_EXTRACTORS[key]
@@ -167,22 +185,27 @@ async def extract_course_data(
             print(f"  [SKIP] {label}: 이 과목에 없음")
             continue
         try:
-            result[key] = await extractor_fn(page, cid)
+            if key == "boards":
+                result[key] = await extractor_fn(page, cid, scanned_boards=scan.boards)
+            else:
+                result[key] = await extractor_fn(page, cid)
         except Exception as e:
             print(f"  [에러] {label} 추출 실패 (course={cid}): {e}")
             result[key] = {"_error": str(e)}
         await asyncio.sleep(REQUEST_DELAY)
 
-    # 수업자료 다운로드
     if do_download or (extract_types and "materials" in extract_types):
-        try:
-            dl_results = await download_materials(
-                page, cid, course["name"], scan.downloadable_resources
-            )
-            result["downloaded_materials"] = dl_results
-        except Exception as e:
-            print(f"  [에러] 자료 다운로드 실패: {e}")
-            result["downloaded_materials"] = {"_error": str(e)}
+        if scan.downloadable_resources:
+            try:
+                dl_results = await download_materials(
+                    page, cid, course["name"], scan.downloadable_resources
+                )
+                result["downloaded_materials"] = dl_results
+            except Exception as e:
+                print(f"  [에러] 자료 다운로드 실패: {e}")
+                result["downloaded_materials"] = {"_error": str(e)}
+        else:
+            print(f"  [SKIP] 수업자료: 다운로드 가능한 리소스 없음")
 
     return result
 
@@ -209,7 +232,7 @@ async def run(args):
             print(f"\n  사용법: python main.py --course 1 2 --only syllabus grades")
             return
 
-        # --course 필터링
+        # --course
         if args.course:
             courses = _filter_courses(courses, args.course)
             if not courses:
@@ -225,13 +248,11 @@ async def run(args):
             print(f"\n[테스트 모드] 첫 번째 과목만: {courses[0]['name']}")
 
         extract_types = args.only or None
-        if extract_types:
-            labels = [FEATURE_EXTRACTORS[t][0] for t in extract_types if t in FEATURE_EXTRACTORS]
-            if "materials" in extract_types:
-                labels.append("수업자료 다운로드")
-            print(f"[선택] 추출 타입: {', '.join(labels)}")
+        do_download = args.download or (extract_types and "materials" in extract_types)
 
-        # Phase 1: 전체 과목 구조 스캔
+        # ============================================================
+        # Phase 1: 구조 분석 (강제)
+        # ============================================================
         print(f"\n--- Phase 1: 구조 분석 ({len(courses)}개 과목) ---")
         scans: dict[int, CourseScan] = {}
         for course in courses:
@@ -242,31 +263,26 @@ async def run(args):
                 print(f"  [에러] 스캔 실패 ({course['name']}): {e}")
             await asyncio.sleep(REQUEST_DELAY)
 
-        # --scan: 스캔 결과만 출력
-        if args.scan:
-            print(f"\n--- 구조 분석 결과 ---")
-            for course in courses:
-                scan = scans.get(course["id"])
-                if not scan:
-                    continue
-                print(f"\n  [{course['id']}] {course['name']}")
-                print(f"    기능: {', '.join(f.label for f in scan.features)}")
-                if scan.boards:
-                    print(f"    게시판: {', '.join(b['name'] for b in scan.boards)}")
-                if scan.downloadable_resources:
-                    print(f"    다운로드 가능: {len(scan.downloadable_resources)}개 자료")
+        # 스캔 결과 요약 (항상 출력)
+        extract_plan = extract_types or (list(FEATURE_EXTRACTORS.keys()) + (["materials"] if do_download else []))
+        _print_scan_summary(courses, scans, extract_plan)
 
-            scan_output = {
-                "semester": CURRENT_SEMESTER,
-                "scanned_at": datetime.now().isoformat(),
-                "courses": {str(cid): s.to_dict() for cid, s in scans.items()},
-            }
-            scan_path = OUTPUT_DIR / "scan_result.json"
-            _save_json(scan_output, scan_path)
-            print(f"\n  스캔 결과 저장: {scan_path}")
+        # 스캔 결과 JSON 저장 (항상)
+        scan_output = {
+            "semester": CURRENT_SEMESTER,
+            "scanned_at": datetime.now().isoformat(),
+            "courses": {str(cid): s.to_dict() for cid, s in scans.items()},
+        }
+        _save_json(scan_output, OUTPUT_DIR / "scan_result.json")
+
+        # --scan: 여기서 종료
+        if args.scan:
+            print(f"\n  스캔 결과 저장: {OUTPUT_DIR / 'scan_result.json'}")
             return
 
-        # 캘린더
+        # ============================================================
+        # Phase 2: 스캔 기반 데이터 추출
+        # ============================================================
         calendar_events = []
         if not args.no_calendar and session.sesskey:
             try:
@@ -276,11 +292,9 @@ async def run(args):
             except Exception as e:
                 print(f"  [에러] 캘린더 추출 실패: {e}")
 
-        # Phase 2: 스캔 기반 데이터 추출
         print(f"\n--- Phase 2: 데이터 추출 ---")
         course_data = []
         failed = []
-        do_download = args.download or (extract_types and "materials" in extract_types)
 
         for course in courses:
             scan = scans.get(course["id"])
@@ -317,8 +331,6 @@ async def run(args):
             "calendar_events": calendar_events,
             "courses": course_data,
         }
-
-        OUTPUT_DIR.mkdir(exist_ok=True)
         full_path = OUTPUT_DIR / f"{CURRENT_SEMESTER}_semester.json"
         _save_json(full_result, full_path)
 

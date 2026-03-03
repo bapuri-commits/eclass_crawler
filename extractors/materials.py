@@ -4,20 +4,11 @@ Moodle resource/folder 활동 및 게시판 첨부파일을 다운로드한다.
 """
 
 import asyncio
-import hashlib
 import re
-import sys
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from config import BASE_URL, REQUEST_DELAY
-
-# Windows cp949 콘솔에서 한글 출력 시 UnicodeEncodeError 방지
-if sys.platform == "win32":
-    try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+from config import REQUEST_DELAY, MIN_DOWNLOAD_SIZE_BYTES
 
 DOWNLOADS_DIR = Path(__file__).parent.parent / "output" / "downloads"
 
@@ -237,7 +228,11 @@ async def _try_download(page, url: str, name: str, dest_dir: Path) -> dict | Non
 
         save_path = _unique_path(dest_dir, suggested)
         await download.save_as(str(save_path))
-        size_kb = save_path.stat().st_size / 1024
+        file_size = save_path.stat().st_size
+        if file_size < MIN_DOWNLOAD_SIZE_BYTES:
+            save_path.unlink(missing_ok=True)
+            return None
+        size_kb = file_size / 1024
         print(f"    -> {save_path.name} ({size_kb:.1f}KB)")
 
         return {
@@ -269,6 +264,8 @@ async def _try_download(page, url: str, name: str, dest_dir: Path) -> dict | Non
 
             save_path = _unique_path(dest_dir, filename)
             body = await response.body()
+            if len(body) < MIN_DOWNLOAD_SIZE_BYTES:
+                return None
             save_path.write_bytes(body)
             size_kb = len(body) / 1024
             print(f"    -> {filename} ({size_kb:.1f}KB)")

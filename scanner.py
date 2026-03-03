@@ -4,9 +4,10 @@
 실제 존재하는 항목만 파악한 뒤, 그에 맞는 추출 계획을 생성한다.
 """
 
+import asyncio
 import re
 from dataclasses import dataclass, field, asdict
-from config import BASE_URL
+from config import BASE_URL, GLOBAL_BOARD_IDS, REQUEST_DELAY
 
 
 @dataclass
@@ -174,12 +175,12 @@ async def scan_course(page, course_id: int, course_name: str = "") -> CourseScan
                 return links;
             }
         """)
-        GLOBAL_BOARD_IDS = {31, 32, 33}
         scan.boards = [b for b in board_links if b["id"] not in GLOBAL_BOARD_IDS]
 
     # 4. 학습자료실 게시판에서 첨부파일 링크 수집
     for board in scan.boards:
         if any(kw in board["name"] for kw in ("자료", "학습", "resource", "파일")):
+            await asyncio.sleep(REQUEST_DELAY)
             await page.goto(board["url"], wait_until="networkidle")
             file_links = await page.evaluate("""
                 () => {
