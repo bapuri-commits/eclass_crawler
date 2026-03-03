@@ -11,6 +11,7 @@
   python main.py --download               # 수업자료 파일 다운로드 포함
   python main.py --course 2 --only syllabus --download
   python main.py --test                   # 첫 과목만 추출 (테스트)
+  python main.py --obsidian               # 크롤링 후 옵시디언 동기화
 """
 
 import argparse
@@ -71,6 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
   python main.py --download                 수업자료 다운로드 포함
   python main.py --course 2 --download      특정 과목 자료 다운로드
   python main.py --no-calendar              캘린더 제외
+  python main.py --obsidian                옵시디언 동기화 포함
         """,
     )
     parser.add_argument("--list", action="store_true",
@@ -88,6 +90,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="캘린더 이벤트 추출 건너뛰기")
     parser.add_argument("--test", action="store_true",
                         help="첫 번째 과목만 추출 (테스트)")
+    parser.add_argument("--obsidian", action="store_true",
+                        help="추출 후 옵시디언 볼트에 마크다운 동기화")
     return parser
 
 
@@ -346,6 +350,15 @@ async def run(args):
         if do_download:
             print(f"  다운로드 폴더: output/downloads/")
         print(f"{'='*60}")
+
+        # Phase 3: 옵시디언 동기화 (--obsidian)
+        if args.obsidian:
+            try:
+                from extensions.obsidian_sync import sync
+                sync(full_result)
+            except Exception as e:
+                print(f"  [에러] 옵시디언 동기화 실패: {e}")
+                traceback.print_exc()
 
     finally:
         await session.close()
