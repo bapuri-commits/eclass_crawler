@@ -96,6 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _sanitize_filename(name: str) -> str:
+    name = re.sub(r'\s*-\s*\d+분반.*$', '', name)
     name = re.sub(r'[<>:"/\\|?*]', '', name)
     name = re.sub(r'\s+', '_', name).strip('_')
     return name[:80]
